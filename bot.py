@@ -4,10 +4,10 @@ from io import BytesIO
 from PIL import Image
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    ContextTypes, filters
 )
 
 from openai import OpenAI
@@ -21,40 +21,59 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ====== Память ======
 user_memory = {}
+bot_messages = {}
+
 MAX_HISTORY = 10
 
-# ====== Кнопки ======
+# ====== Клавиатура ======
 def main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧹 Очистить память", callback_data="clear"),
-         InlineKeyboardButton("ℹ️ О боте", callback_data="about")],
-        [InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="gen_image")]
-    ])
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton("🗑 Очистить чат"), KeyboardButton("ℹ️ О боте")],
+            [KeyboardButton("🎨 Сгенерировать картинку")]
+        ],
+        resize_keyboard=True
+    )
 
 # ====== /start ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я SmartAI-бот! 🎨\n"
-        "Пиши мне или упоминай меня в группе через @.",
+        "Привет! Я SmartAI-бот 🤖\nПиши сообщение или используй кнопки ниже.",
         reply_markup=main_keyboard()
     )
 
-# ====== Кнопки ======
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
+# ====== Текст ======
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.message.from_user.id
 
-    if query.data == "clear":
+    # ===== Очистка чата =====
+    if text == "🗑 Очистить чат":
         user_memory[user_id] = []
-        await query.edit_message_text("🧹 Память очищена!")
 
-    elif query.data == "about":
-        await query.edit_message_text(
-            "Я GPT-бот с памятью, кнопками и генерацией изображений 🎨"
+        # Удаляем последние сообщения бота
+        if user_id in bot_messages:
+            for msg_id in bot_messages[user_id][-20:]:
+                try:
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                except:
+                    pass
+
+        sent = await update.message.reply_text("🧹 Чат очищен!", reply_markup=main_keyboard())
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
+        return
+
+    # ===== О боте =====
+    if text == "ℹ️ О боте":
+        sent = await update.message.reply_text(
+            "Я GPT-бот с памятью, кнопками и генерацией изображений 🎨",
+            reply_markup=main_keyboard()
         )
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
+        return
 
-    elif query.data == "gen_image":
+    # ===== Генерация картинки =====
+    if text == "🎨 Сгенерировать картинку":
         prompt = "Фантастический пейзаж в стиле цифрового искусства"
         try:
             response = client.images.generate(
@@ -63,39 +82,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 size="512x512"
             )
             image_url = response.data[0].url
-            await query.message.reply_photo(photo=image_url, caption=f"Вот картинка по промпту:\n{prompt}")
+            sent = await update.message.reply_photo(
+                photo=image_url,
+                caption=f"Вот изображение:\n{prompt}",
+                reply_markup=main_keyboard()
+            )
+            bot_messages.setdefault(user_id, []).append(sent.message_id)
         except Exception as e:
-            await query.message.reply_text(f"Ошибка при генерации картинки: {e}")
+            sent = await update.message.reply_text(f"Ошибка: {e}")
+            bot_messages.setdefault(user_id, []).append(sent.message_id)
+        return
 
-# ====== Работа с текстом ======
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    chat = message.chat
-    text = message.text
-    user_id = message.from_user.id
-    bot_username = context.bot.username
-    bot_id = context.bot.id
-
-    # ===== Логика групп =====
-    if chat.type in ["group", "supergroup"]:
-        mentioned = False
-        if message.entities:
-            for entity in message.entities:
-                if entity.type == "mention":
-                    mention_text = text[entity.offset: entity.offset + entity.length]
-                    if mention_text.lower() == f"@{bot_username.lower()}":
-                        mentioned = True
-                        break
-        replied_to_bot = (
-            message.reply_to_message
-            and message.reply_to_message.from_user
-            and message.reply_to_message.from_user.id == bot_id
-        )
-        if not mentioned and not replied_to_bot:
-            return
-        text = text.replace(f"@{bot_username}", "").strip()
-
-    # ===== Память =====
+    # ===== Обычный диалог =====
     history = user_memory.get(user_id, [])
     history.append({"role": "user", "content": text})
     history = history[-MAX_HISTORY:]
@@ -104,7 +102,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ты полезный, умный и дружелюбный ассистент."},
+                {"role": "system", "content": "Ты умный, дружелюбный помощник."},
                 *history
             ],
             max_tokens=700
@@ -114,17 +112,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": answer})
         user_memory[user_id] = history
 
-        await message.reply_text(answer, reply_markup=main_keyboard())
-    except Exception as e:
-        await message.reply_text(f"Ошибка: {e}")
+        sent = await update.message.reply_text(answer, reply_markup=main_keyboard())
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
 
-# ====== Работа с изображениями ======
+    except Exception as e:
+        sent = await update.message.reply_text(f"Ошибка: {e}")
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
+
+# ====== Фото ======
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
     photo = update.message.photo[-1]
     file = await photo.get_file()
     img_bytes = await file.download_as_bytearray()
-    img = Image.open(BytesIO(img_bytes))
 
+    img = Image.open(BytesIO(img_bytes))
     buffered = BytesIO()
     img.save(buffered, format="PNG")
     b64_image = base64.b64encode(buffered.getvalue()).decode()
@@ -143,15 +145,18 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         answer = response.choices[0].message.content
-        await update.message.reply_text(answer, reply_markup=main_keyboard())
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка с изображением: {e}")
+        sent = await update.message.reply_text(answer, reply_markup=main_keyboard())
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
 
-# ====== Запуск бота ======
+    except Exception as e:
+        sent = await update.message.reply_text(f"Ошибка с изображением: {e}")
+        bot_messages.setdefault(user_id, []).append(sent.message_id)
+
+# ====== Запуск ======
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 
