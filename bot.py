@@ -1,12 +1,15 @@
 import os
-from aiohttp import web
+import base64
+from io import BytesIO
+from PIL import Image
 from dotenv import load_dotenv
 
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from openai import OpenAI
 
-# ===== ENV =====
+# ===== Load ENV =====
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,12 +28,17 @@ MAX_HISTORY = 10
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧹 Очистить память", callback_data="clear"),
-         InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
+         InlineKeyboardButton("ℹ️ О боте", callback_data="about")],
+        [InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="gen_image")]
     ])
 
 # ===== Handlers =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я SmartAI-бот 🤖", reply_markup=main_keyboard())
+    await update.message.reply_text(
+        "Привет! Я SmartAI-бот! 🎨\n"
+        "Пиши мне или упоминай меня в группе через @.",
+        reply_markup=main_keyboard()
+    )
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -39,10 +47,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "clear":
         user_memory[uid] = []
-        await query.edit_message_text("🧹 Память очищена")
+        await query.edit_message_text("🧹 Память очищена!")
 
     elif query.data == "about":
-        await query.edit_message_text("Я AI-бот с памятью и изображениями 🤖")
+        await query.edit_message_text("Я GPT-бот с памятью и генерацией изображений 🎨")
+
+    elif query.data == "gen_image":
+        prompt = "Фантастический пейзаж в стиле цифрового искусства"
+        try:
+            resp = client.images.generate(model="gpt-image-1", prompt=prompt, size="512x512")
+            url = resp.data[0].url
+            await query.message.reply_photo(photo=url, caption=f"Вот картинка по промпту:\n{prompt}")
+        except Exception as e:
+            await query.message.reply_text(f"Ошибка генерации картинки: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
@@ -55,8 +72,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Ты умный ассистент"}, *history],
-            max_tokens=600
+            messages=[{"role": "system", "content": "Ты полезный ассистент"}, *history],
+            max_tokens=700
         )
         answer = resp.choices[0].message.content
         history.append({"role": "assistant", "content": answer})
@@ -65,6 +82,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(answer, reply_markup=main_keyboard())
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    img_bytes = await file.download_as_bytearray()
+    img = Image.open(BytesIO(img_bytes))
+
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    b64_image = base64.b64encode(buffered.getvalue()).decode()
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Опиши изображение подробно"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+                ]
+            }],
+            max_tokens=800
+        )
+        answer = resp.choices[0].message.content
+        await update.message.reply_text(answer, reply_markup=main_keyboard())
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка с изображением: {e}")
 
 # ===== Webhook endpoint =====
 async def telegram_webhook(request):
@@ -83,10 +127,11 @@ async def main():
     tg_app.add_handler(CommandHandler("start", start))
     tg_app.add_handler(CallbackQueryHandler(buttons))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    tg_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 
     await tg_app.initialize()
 
-    # Web server
+    # ===== Web server =====
     app = web.Application()
     app["tg_app"] = tg_app
     app.router.add_post(f"/webhook/{TELEGRAM_TOKEN}", telegram_webhook)
@@ -98,11 +143,11 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    # Устанавливаем Webhook в Telegram
+    # ===== Set webhook =====
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook/{TELEGRAM_TOKEN}"
     await bot.set_webhook(url)
 
-    print(f"🌐 Web + Telegram webhook running on {port}")
+    print(f"🌐 Bot + Webhook running on {port}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
