@@ -1,13 +1,15 @@
 import os
 import base64
+import threading
 from io import BytesIO
 from PIL import Image
 from dotenv import load_dotenv
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
+    CallbackQueryHandler, ContextTypes, filters
 )
 
 from openai import OpenAI
@@ -19,61 +21,50 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ====== Flask server (для деплоя) ======
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "✅ Bot is running"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 3000))
+    flask_app.run(host="0.0.0.0", port=port)
+
 # ====== Память ======
 user_memory = {}
-bot_messages = {}
-
 MAX_HISTORY = 10
 
-# ====== Клавиатура ======
+# ====== Кнопки ======
 def main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton("🗑 Очистить чат"), KeyboardButton("ℹ️ О боте")],
-            [KeyboardButton("🎨 Сгенерировать картинку")]
-        ],
-        resize_keyboard=True
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 Очистить память", callback_data="clear"),
+         InlineKeyboardButton("ℹ️ О боте", callback_data="about")],
+        [InlineKeyboardButton("🎨 Сгенерировать картинку", callback_data="gen_image")]
+    ])
 
 # ====== /start ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я SmartAI-бот 🤖\nПиши сообщение или используй кнопки ниже.",
+        "Привет! Я SmartAI-бот! 🎨",
         reply_markup=main_keyboard()
     )
 
-# ====== Текст ======
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.message.from_user.id
+# ====== Кнопки ======
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
 
-    # ===== Очистка чата =====
-    if text == "🗑 Очистить чат":
+    if query.data == "clear":
         user_memory[user_id] = []
+        await query.edit_message_text("🧹 Память очищена!")
 
-        # Удаляем последние сообщения бота
-        if user_id in bot_messages:
-            for msg_id in bot_messages[user_id][-20:]:
-                try:
-                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-                except:
-                    pass
+    elif query.data == "about":
+        await query.edit_message_text("Я SmartAI-бот от компании SmartAI 🎨")
 
-        sent = await update.message.reply_text("🧹 Чат очищен!", reply_markup=main_keyboard())
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
-        return
-
-    # ===== О боте =====
-    if text == "ℹ️ О боте":
-        sent = await update.message.reply_text(
-            "Я GPT-бот с памятью, кнопками и генерацией изображений 🎨",
-            reply_markup=main_keyboard()
-        )
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
-        return
-
-    # ===== Генерация картинки =====
-    if text == "🎨 Сгенерировать картинку":
+    elif query.data == "gen_image":
         prompt = "Фантастический пейзаж в стиле цифрового искусства"
         try:
             response = client.images.generate(
@@ -81,19 +72,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prompt=prompt,
                 size="512x512"
             )
-            image_url = response.data[0].url
-            sent = await update.message.reply_photo(
-                photo=image_url,
-                caption=f"Вот изображение:\n{prompt}",
-                reply_markup=main_keyboard()
+            await query.message.reply_photo(
+                photo=response.data[0].url,
+                caption=f"Вот картинка:\n{prompt}"
             )
-            bot_messages.setdefault(user_id, []).append(sent.message_id)
         except Exception as e:
-            sent = await update.message.reply_text(f"Ошибка: {e}")
-            bot_messages.setdefault(user_id, []).append(sent.message_id)
-        return
+            await query.message.reply_text(f"Ошибка: {e}")
 
-    # ===== Обычный диалог =====
+# ====== Текст ======
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    text = message.text
+    user_id = message.from_user.id
+
     history = user_memory.get(user_id, [])
     history.append({"role": "user", "content": text})
     history = history[-MAX_HISTORY:]
@@ -102,7 +93,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ты умный, дружелюбный помощник."},
+                {"role": "system", "content": "Ты умный и дружелюбный помощник."},
                 *history
             ],
             max_tokens=700
@@ -112,24 +103,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": answer})
         user_memory[user_id] = history
 
-        sent = await update.message.reply_text(answer, reply_markup=main_keyboard())
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
-
+        await message.reply_text(answer, reply_markup=main_keyboard())
     except Exception as e:
-        sent = await update.message.reply_text(f"Ошибка: {e}")
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
+        await message.reply_text(f"Ошибка: {e}")
 
 # ====== Фото ======
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
     photo = update.message.photo[-1]
     file = await photo.get_file()
     img_bytes = await file.download_as_bytearray()
 
     img = Image.open(BytesIO(img_bytes))
-    buffered = BytesIO()
-    img.save(buffered, format="PNG")
-    b64_image = base64.b64encode(buffered.getvalue()).decode()
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    b64_image = base64.b64encode(buf.getvalue()).decode()
 
     try:
         response = client.chat.completions.create(
@@ -137,30 +124,30 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Опиши изображение подробно"},
+                    {"type": "text", "text": "Опиши изображение"},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
                 ]
             }],
             max_tokens=800
         )
 
-        answer = response.choices[0].message.content
-        sent = await update.message.reply_text(answer, reply_markup=main_keyboard())
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
-
+        await update.message.reply_text(response.choices[0].message.content, reply_markup=main_keyboard())
     except Exception as e:
-        sent = await update.message.reply_text(f"Ошибка с изображением: {e}")
-        bot_messages.setdefault(user_id, []).append(sent.message_id)
+        await update.message.reply_text(f"Ошибка: {e}")
 
 # ====== Запуск ======
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Flask в фоне
+    threading.Thread(target=run_flask).start()
 
+    # Telegram бот
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 
-    print("🤖 Бот запущен")
+    print("🤖 Бот + Flask сервер запущены")
     app.run_polling()
 
 if __name__ == "__main__":
