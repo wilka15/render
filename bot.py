@@ -10,29 +10,24 @@ from telegram.ext import (
 
 from openai import OpenAI
 
-# ====== Загрузка ключей ======
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# ====== RouterAI через OpenAI SDK ======
 client = OpenAI(
     api_key=OPENAI_API_KEY,
     base_url="https://routerai.ru/api/v1"
 )
 
-# ====== Память пользователей ======
 user_memory = {}
 MAX_HISTORY = 10
 
-# ====== Кнопки ======
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧹 Очистить память", callback_data="clear"),
          InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
     ])
 
-# ====== Команды ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я SmartAI-бот 🤖\n"
@@ -54,7 +49,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Модель: openai/gpt-4o"
     )
 
-# ====== Кнопки ======
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -66,7 +60,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "about":
         await query.edit_message_text("GPT-бот через RouterAI 🤖")
 
-# ====== Текст ======
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     text = update.message.text
@@ -94,7 +87,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-# ====== Фото ======
 async def handle_homework_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await photo.get_file()
@@ -125,7 +117,6 @@ async def handle_homework_image(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-# ====== Запуск ======
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -141,3 +132,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
